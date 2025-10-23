@@ -19,10 +19,10 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
+	"github.com/gohugoio/hugo/tpl/tplimpl"
 	"github.com/spf13/cobra"
 )
 
@@ -92,8 +92,8 @@ func (c *schemaCmd) runSchema(templatePath string) error {
 		return fmt.Errorf("failed to read template file: %v", err)
 	}
 
-	// Extract variables and generate schema
-	schema := c.generateSchema(string(content), templatePath)
+    // Extract variables and generate schema using Hugo analyzer
+    schema := c.generateSchemaFromTemplate(templatePath, string(content))
 
 	// Output JSON schema
 	jsonOutput, err := json.MarshalIndent(schema, "", "  ")
@@ -105,7 +105,7 @@ func (c *schemaCmd) runSchema(templatePath string) error {
 	return nil
 }
 
-func (c *schemaCmd) generateSchema(templateContent, templatePath string) *TemplateSchema {
+func (c *schemaCmd) generateSchemaFromTemplate(templatePath string, content string) *TemplateSchema {
 	schema := &TemplateSchema{
 		Title:       fmt.Sprintf("Schema for %s", filepath.Base(templatePath)),
 		Description: fmt.Sprintf("JSON schema for Hugo template: %s", templatePath),
@@ -115,27 +115,30 @@ func (c *schemaCmd) generateSchema(templateContent, templatePath string) *Templa
 		Variables:   []TemplateVariable{},
 	}
 
-	// Track all variables found
-	variables := make(map[string]TemplateVariable)
-
-	// Extract variables using regex
-	c.extractVariablesFromContent(templateContent, variables)
+    // Analyze using Hugo's parser/AST via tplimpl
+    analysis, err := tplimpl.AnalyzeTemplate(filepath.Base(templatePath), content, false)
+    if err != nil {
+        // Fall back to empty schema on parse error
+        return schema
+    }
 
 	// Convert variables to schema properties
-	for _, variable := range variables {
-		schema.Variables = append(schema.Variables, variable)
-		
-		// Add to properties
-		propType := c.inferType(variable.Name, variable.Path)
-		schema.Properties[variable.Name] = map[string]interface{}{
-			"type":        propType,
-			"description": variable.Description,
-		}
-
-		if variable.Required {
-			schema.Required = append(schema.Required, variable.Name)
-		}
-	}
+    for _, v := range analysis.Vars {
+        tv := TemplateVariable{
+            Name:        v.Name,
+            Type:        func() string { if v.IsArray { return "array" }; return c.inferType(v.Name, "") }(),
+            Description: c.getFieldDescription(v.Name),
+            Required:    v.Required,
+        }
+        schema.Variables = append(schema.Variables, tv)
+        schema.Properties[v.Name] = map[string]interface{}{
+            "type":        tv.Type,
+            "description": tv.Description,
+        }
+        if v.Required {
+            schema.Required = append(schema.Required, v.Name)
+        }
+    }
 
 	// Sort variables for consistent output
 	sort.Slice(schema.Variables, func(i, j int) bool {
@@ -148,121 +151,7 @@ func (c *schemaCmd) generateSchema(templateContent, templatePath string) *Templa
 	return schema
 }
 
-func (c *schemaCmd) extractVariablesFromContent(content string, variables map[string]TemplateVariable) {
-	// Regex patterns for different template constructs
-	patterns := map[string]*regexp.Regexp{
-		// Field access: .Title, .Site.Title, .Params.something
-		"fieldAccess": regexp.MustCompile(`\{\{\s*\.([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}`),
-		// Variable references: $title, $site
-		"variableRef": regexp.MustCompile(`\{\{\s*\$([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}`),
-		// Variable declarations: $title := .Title
-		"variableDecl": regexp.MustCompile(`\{\{\s*\$([a-zA-Z_][a-zA-Z0-9_.]*)\s*:=\s*[^}]+\}\}`),
-		// Function calls with field access: {{ .Title | upper }}
-		"functionWithField": regexp.MustCompile(`\{\{\s*\.([a-zA-Z_][a-zA-Z0-9_.]*)\s*\|[^}]+\}\}`),
-		// Range over fields: {{ range .Pages }}
-		"rangeField": regexp.MustCompile(`\{\{\s*range\s+\.([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}`),
-		// With field: {{ with .Site }}
-		"withField": regexp.MustCompile(`\{\{\s*with\s+\.([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}`),
-		// If field: {{ if .Title }}
-		"ifField": regexp.MustCompile(`\{\{\s*if\s+\.([a-zA-Z_][a-zA-Z0-9_.]*)\s*\}\}`),
-	}
-
-	// Extract field access patterns
-	for _, match := range patterns["fieldAccess"].FindAllStringSubmatch(content, -1) {
-		if len(match) > 1 {
-			fieldName := match[1]
-			variables[fieldName] = TemplateVariable{
-				Name:        fieldName,
-				Type:        c.inferType(fieldName, ""),
-				Description: c.getFieldDescription(fieldName),
-				Required:    true,
-				Path:        "",
-			}
-		}
-	}
-
-	// Extract variable references
-	for _, match := range patterns["variableRef"].FindAllStringSubmatch(content, -1) {
-		if len(match) > 1 {
-			varName := match[1]
-			variables[varName] = TemplateVariable{
-				Name:     varName,
-				Type:     "any",
-				Required: false,
-				Path:     "",
-			}
-		}
-	}
-
-	// Extract variable declarations
-	for _, match := range patterns["variableDecl"].FindAllStringSubmatch(content, -1) {
-		if len(match) > 1 {
-			varName := match[1]
-			variables[varName] = TemplateVariable{
-				Name:     varName,
-				Type:     "any",
-				Required: false,
-				Path:     "",
-			}
-		}
-	}
-
-	// Extract function calls with field access
-	for _, match := range patterns["functionWithField"].FindAllStringSubmatch(content, -1) {
-		if len(match) > 1 {
-			fieldName := match[1]
-			variables[fieldName] = TemplateVariable{
-				Name:        fieldName,
-				Type:        c.inferType(fieldName, ""),
-				Description: c.getFieldDescription(fieldName),
-				Required:    true,
-				Path:        "",
-			}
-		}
-	}
-
-	// Extract range fields
-	for _, match := range patterns["rangeField"].FindAllStringSubmatch(content, -1) {
-		if len(match) > 1 {
-			fieldName := match[1]
-			variables[fieldName] = TemplateVariable{
-				Name:        fieldName,
-				Type:        "array",
-				Description: c.getFieldDescription(fieldName),
-				Required:    true,
-				Path:        "",
-			}
-		}
-	}
-
-	// Extract with fields
-	for _, match := range patterns["withField"].FindAllStringSubmatch(content, -1) {
-		if len(match) > 1 {
-			fieldName := match[1]
-			variables[fieldName] = TemplateVariable{
-				Name:        fieldName,
-				Type:        c.inferType(fieldName, ""),
-				Description: c.getFieldDescription(fieldName),
-				Required:    true,
-				Path:        "",
-			}
-		}
-	}
-
-	// Extract if fields
-	for _, match := range patterns["ifField"].FindAllStringSubmatch(content, -1) {
-		if len(match) > 1 {
-			fieldName := match[1]
-			variables[fieldName] = TemplateVariable{
-				Name:        fieldName,
-				Type:        c.inferType(fieldName, ""),
-				Description: c.getFieldDescription(fieldName),
-				Required:    true,
-				Path:        "",
-			}
-		}
-	}
-}
+// regex-based helpers removed in favor of native Hugo AST analyzer
 
 func (c *schemaCmd) inferType(fieldName, path string) string {
 	// Common Hugo field types
