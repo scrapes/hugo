@@ -1,6 +1,9 @@
 package tplimpl
 
 import (
+    "os"
+    "path/filepath"
+
     "github.com/gohugoio/hugo/tpl/internal/go_templates/texttemplate/parse"
 )
 
@@ -20,7 +23,15 @@ type TemplateAnalysis struct {
 // and returns an analysis of variables referenced by the template.
 // name is the template name used for parsing; isText indicates plain text template parsing.
 func AnalyzeTemplate(name, content string, isText bool) (TemplateAnalysis, error) {
-    ns := newTemplateNamespace(map[string]interface{}{})
+    // Provide minimal func map so parser recognizes identifiers like "partial".
+    funcs := map[string]interface{}{
+        "partial":       func(string, interface{}) interface{} { return nil },
+        "partialCached": func(string, interface{}) interface{} { return nil },
+        "return":        func(interface{}) interface{} { return nil },
+        // Common helpers occasionally referenced in templates; stubs for parse-time.
+        "len": func(v interface{}) int { return 0 },
+    }
+    ns := newTemplateNamespace(funcs)
 
     // Parse the template into the namespace.
     ts, err := ns.parse(templateInfo{name: name, template: content, isText: isText})
@@ -30,9 +41,7 @@ func AnalyzeTemplate(name, content string, isText bool) (TemplateAnalysis, error
 
     // Get the parse tree and walk it.
     tree := getParseTree(ts.Template)
-    collector := &varCollector{
-        vars: make(map[string]TemplateVar),
-    }
+    collector := &varCollector{vars: make(map[string]TemplateVar)}
     collector.walk(tree.Root, false)
 
     // Convert to slice.
@@ -78,6 +87,19 @@ func (c *varCollector) walk(n parse.Node, inConditional bool) {
             c.walk(cmd, inConditional)
         }
     case *parse.CommandNode:
+        // Detect partial/partialCached calls: partial "name" .
+        if len(nn.Args) > 0 {
+            if id, ok := nn.Args[0].(*parse.IdentifierNode); ok {
+                if id.Ident == "partial" || id.Ident == "partialCached" {
+                    // second arg should be the partial name string
+                    if len(nn.Args) > 1 {
+                        if sn, ok2 := nn.Args[1].(*parse.StringNode); ok2 {
+                            c.loadAndWalkPartial(sn.Text, inConditional)
+                        }
+                    }
+                }
+            }
+        }
         for _, arg := range nn.Args {
             switch a := arg.(type) {
             case *parse.PipeNode:
@@ -129,6 +151,48 @@ func (c *varCollector) walk(n parse.Node, inConditional bool) {
     case *parse.TextNode:
         // ignore
     }
+}
+
+// loadAndWalkPartial tries to resolve a partial by common layout paths and walk it.
+// We assume the current working directory is the project root or site root.
+func (c *varCollector) loadAndWalkPartial(name string, inConditional bool) {
+    // Resolve candidate filenames
+    candidates := []string{}
+    // If name has no extension, try .html
+    if filepath.Ext(name) == "" {
+        candidates = append(candidates, filepath.Join("layouts", "partials", name+".html"))
+    }
+    // Try as given inside partials/
+    candidates = append(candidates, filepath.Join("layouts", "partials", name))
+    // Try direct relative (in case absolute-like passed in)
+    candidates = append(candidates, name)
+
+    var content []byte
+    for _, cand := range candidates {
+        b, err := os.ReadFile(cand)
+        if err == nil {
+            content = b
+            break
+        }
+    }
+    if len(content) == 0 {
+        return
+    }
+
+    // Parse and walk the partial template locally
+    funcs := map[string]interface{}{
+        "partial":       func(string, interface{}) interface{} { return nil },
+        "partialCached": func(string, interface{}) interface{} { return nil },
+        "return":        func(interface{}) interface{} { return nil },
+        "len":           func(v interface{}) int { return 0 },
+    }
+    ns := newTemplateNamespace(funcs)
+    ts, err := ns.parse(templateInfo{name: name, template: string(content), isText: false})
+    if err != nil {
+        return
+    }
+    tree := getParseTree(ts.Template)
+    c.walk(tree.Root, inConditional)
 }
 
 func joinIdents(idents []string) string {
