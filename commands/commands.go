@@ -57,6 +57,7 @@ func (b *commandsBuilder) addAll() *commandsBuilder {
 		newGenCmd(),
 		createReleaser(),
 		b.newModCmd(),
+		newSchemaCmd(),
 	)
 
 	return b
