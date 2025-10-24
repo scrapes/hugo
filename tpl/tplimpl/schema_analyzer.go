@@ -61,7 +61,7 @@ func AnalyzeTemplate(name, content string, isText bool) (TemplateAnalysis, error
     // Get the parse tree and walk it.
     tree := getParseTree(ts.Template)
     collector := &varCollector{vars: make(map[string]TemplateVar)}
-    collector.walk(tree.Root, false)
+    collector.walkWithPrefix(tree.Root, false, "")
 
     // Convert to slice.
     out := TemplateAnalysis{}
@@ -91,19 +91,23 @@ func (c *varCollector) add(name string, required bool, isArray bool) {
 }
 
 func (c *varCollector) walk(n parse.Node, inConditional bool) {
+    c.walkWithPrefix(n, inConditional, "")
+}
+
+func (c *varCollector) walkWithPrefix(n parse.Node, inConditional bool, elemPrefix string) {
     if n == nil {
         return
     }
     switch nn := n.(type) {
     case *parse.ListNode:
         for _, ch := range nn.Nodes {
-            c.walk(ch, inConditional)
+            c.walkWithPrefix(ch, inConditional, elemPrefix)
         }
     case *parse.ActionNode:
-        c.walk(nn.Pipe, inConditional)
+        c.walkWithPrefix(nn.Pipe, inConditional, elemPrefix)
     case *parse.PipeNode:
         for _, cmd := range nn.Cmds {
-            c.walk(cmd, inConditional)
+            c.walkWithPrefix(cmd, inConditional, elemPrefix)
         }
     case *parse.CommandNode:
         // Detect partial/partialCached calls: partial "name" .
@@ -122,51 +126,68 @@ func (c *varCollector) walk(n parse.Node, inConditional bool) {
         for _, arg := range nn.Args {
             switch a := arg.(type) {
             case *parse.PipeNode:
-                c.walk(a, inConditional)
+                c.walkWithPrefix(a, inConditional, elemPrefix)
             default:
-                c.walk(arg, inConditional)
+                c.walkWithPrefix(arg, inConditional, elemPrefix)
             }
         }
     case *parse.FieldNode:
         // .Title => ["Title"]
-        c.add(joinIdents(nn.Ident), !inConditional, false)
+        name := joinIdents(nn.Ident)
+        if elemPrefix != "" {
+            name = elemPrefix + "." + name
+        }
+        c.add(name, !inConditional, false)
     case *parse.VariableNode:
         // $var references are not part of the page schema; ignore
     case *parse.ChainNode:
         // (.Site).Title => Field has the tail idents
-        c.add(joinIdents(nn.Field), !inConditional, false)
-        c.walk(nn.Node, inConditional)
+        name := joinIdents(nn.Field)
+        if elemPrefix != "" {
+            name = elemPrefix + "." + name
+        }
+        c.add(name, !inConditional, false)
+        c.walkWithPrefix(nn.Node, inConditional, elemPrefix)
     case *parse.IfNode:
-        c.walk(nn.Pipe, true)
-        c.walk(nn.List, true)
+        c.walkWithPrefix(nn.Pipe, true, elemPrefix)
+        c.walkWithPrefix(nn.List, true, elemPrefix)
         if nn.ElseList != nil {
-            c.walk(nn.ElseList, true)
+            c.walkWithPrefix(nn.ElseList, true, elemPrefix)
         }
     case *parse.WithNode:
-        c.walk(nn.Pipe, true)
-        c.walk(nn.List, true)
+        c.walkWithPrefix(nn.Pipe, true, elemPrefix)
+        c.walkWithPrefix(nn.List, true, elemPrefix)
         if nn.ElseList != nil {
-            c.walk(nn.ElseList, true)
+            c.walkWithPrefix(nn.ElseList, true, elemPrefix)
         }
     case *parse.RangeNode:
         // Try to detect ranged-over field => array
+        rangedName := ""
         if nn.Pipe != nil && len(nn.Pipe.Cmds) > 0 {
             // The first arg to the first command commonly is the field being ranged over.
             if len(nn.Pipe.Cmds[0].Args) > 0 {
                 switch a := nn.Pipe.Cmds[0].Args[0].(type) {
                 case *parse.FieldNode:
-                    c.add(joinIdents(a.Ident), !inConditional, true)
+                    rangedName = joinIdents(a.Ident)
                 case *parse.ChainNode:
-                    c.add(joinIdents(a.Field), !inConditional, true)
+                    rangedName = joinIdents(a.Field)
                 }
             }
         }
-        c.walk(nn.List, inConditional)
+        if rangedName != "" {
+            c.add(rangedName, !inConditional, true)
+        }
+        // Element prefix for properties within the ranged collection.
+        nextPrefix := elemPrefix
+        if rangedName != "" {
+            nextPrefix = rangedName + "[]"
+        }
+        c.walkWithPrefix(nn.List, inConditional, nextPrefix)
         if nn.ElseList != nil {
-            c.walk(nn.ElseList, inConditional)
+            c.walkWithPrefix(nn.ElseList, inConditional, nextPrefix)
         }
     case *parse.TemplateNode:
-        c.walk(nn.Pipe, inConditional)
+        c.walkWithPrefix(nn.Pipe, inConditional, elemPrefix)
     case *parse.TextNode:
         // ignore
     }
@@ -242,5 +263,7 @@ func joinIdents(idents []string) string {
     }
     return s
 }
+
+
 
 
