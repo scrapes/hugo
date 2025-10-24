@@ -25,11 +25,30 @@ type TemplateAnalysis struct {
 func AnalyzeTemplate(name, content string, isText bool) (TemplateAnalysis, error) {
     // Provide minimal func map so parser recognizes identifiers like "partial".
     funcs := map[string]interface{}{
+        // Hugo/common helpers (stubs for parse-time only)
         "partial":       func(string, interface{}) interface{} { return nil },
         "partialCached": func(string, interface{}) interface{} { return nil },
         "return":        func(interface{}) interface{} { return nil },
-        // Common helpers occasionally referenced in templates; stubs for parse-time.
-        "len": func(v interface{}) int { return 0 },
+        "i18n":          func(string, ...interface{}) interface{} { return nil },
+        // Builtin-like helpers we often see
+        "printf": func(string, ...interface{}) string { return "" },
+        "len":    func(interface{}) int { return 0 },
+        // Comparators/logic
+        "eq":  func(...interface{}) bool { return false },
+        "ne":  func(...interface{}) bool { return false },
+        "lt":  func(...interface{}) bool { return false },
+        "le":  func(...interface{}) bool { return false },
+        "gt":  func(...interface{}) bool { return false },
+        "ge":  func(...interface{}) bool { return false },
+        "and": func(...interface{}) bool { return false },
+        "or":  func(...interface{}) bool { return false },
+        "not": func(interface{}) bool { return false },
+        // Arithmetic shortcuts sometimes present in themes
+        "div": func(...interface{}) interface{} { return nil },
+        "add": func(...interface{}) interface{} { return nil },
+        "sub": func(...interface{}) interface{} { return nil },
+        "mul": func(...interface{}) interface{} { return nil },
+        "mod": func(...interface{}) interface{} { return nil },
     }
     ns := newTemplateNamespace(funcs)
 
@@ -184,7 +203,23 @@ func (c *varCollector) loadAndWalkPartial(name string, inConditional bool) {
         "partial":       func(string, interface{}) interface{} { return nil },
         "partialCached": func(string, interface{}) interface{} { return nil },
         "return":        func(interface{}) interface{} { return nil },
-        "len":           func(v interface{}) int { return 0 },
+        "i18n":          func(string, ...interface{}) interface{} { return nil },
+        "printf":        func(string, ...interface{}) string { return "" },
+        "len":           func(interface{}) int { return 0 },
+        "eq":            func(...interface{}) bool { return false },
+        "ne":            func(...interface{}) bool { return false },
+        "lt":            func(...interface{}) bool { return false },
+        "le":            func(...interface{}) bool { return false },
+        "gt":            func(...interface{}) bool { return false },
+        "ge":            func(...interface{}) bool { return false },
+        "and":           func(...interface{}) bool { return false },
+        "or":            func(...interface{}) bool { return false },
+        "not":           func(interface{}) bool { return false },
+        "div":           func(...interface{}) interface{} { return nil },
+        "add":           func(...interface{}) interface{} { return nil },
+        "sub":           func(...interface{}) interface{} { return nil },
+        "mul":           func(...interface{}) interface{} { return nil },
+        "mod":           func(...interface{}) interface{} { return nil },
     }
     ns := newTemplateNamespace(funcs)
     ts, err := ns.parse(templateInfo{name: name, template: string(content), isText: false})
