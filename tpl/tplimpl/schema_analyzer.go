@@ -1,7 +1,7 @@
 package tplimpl
 
 import (
-    "os"
+    "io/ioutil"
     "path/filepath"
 
     "github.com/gohugoio/hugo/tpl/internal/go_templates/texttemplate/parse"
@@ -169,7 +169,7 @@ func (c *varCollector) loadAndWalkPartial(name string, inConditional bool) {
 
     var content []byte
     for _, cand := range candidates {
-        b, err := os.ReadFile(cand)
+        b, err := ioutil.ReadFile(cand)
         if err == nil {
             content = b
             break
