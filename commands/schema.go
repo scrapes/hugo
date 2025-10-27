@@ -122,21 +122,145 @@ func (c *schemaCmd) generateSchemaFromTemplate(templatePath string, content stri
         return schema
     }
 
-	// Convert variables to schema properties
+    // Convert variables to schema properties, grouping array item fields under items
+    itemsRequired := make(map[string][]string)
+
+    ensureArray := func(arrName string) map[string]interface{} {
+        if _, ok := schema.Properties[arrName]; !ok {
+            schema.Properties[arrName] = map[string]interface{}{
+                "type":  "array",
+                "items": map[string]interface{}{
+                    "type":       "object",
+                    "properties": map[string]interface{}{},
+                },
+            }
+        }
+        arrProp := schema.Properties[arrName].(map[string]interface{})
+        items := arrProp["items"].(map[string]interface{})
+        props := items["properties"].(map[string]interface{})
+        return props
+    }
+
+    // ensureNested creates nested object schemas along a path like ["properties","bgImage","active"]
+    // and returns the properties map of the leaf container to set the final field.
+    ensureNested := func(props map[string]interface{}, segments []string) map[string]interface{} {
+        cur := props
+        for i, seg := range segments {
+            if i == len(segments)-1 {
+                // leaf field will be set by caller
+                return cur
+            }
+            // ensure seg object exists
+            existing, ok := cur[seg]
+            if !ok {
+                cur[seg] = map[string]interface{}{
+                    "type":       "object",
+                    "properties": map[string]interface{}{},
+                }
+                existing = cur[seg]
+            }
+            obj, ok := existing.(map[string]interface{})
+            if !ok {
+                // Upgrade non-object leaf into an object container
+                obj = map[string]interface{}{}
+                cur[seg] = obj
+            }
+            // if existed as leaf (e.g., type string), force object container
+            obj["type"] = "object"
+            // descend into properties
+            if _, ok := obj["properties"]; !ok {
+                obj["properties"] = map[string]interface{}{}
+            }
+            cur = obj["properties"].(map[string]interface{})
+        }
+        return cur
+    }
+
     for _, v := range analysis.Vars {
-        tv := TemplateVariable{
+        // Always include in variables list for visibility
+        varType := func() string { if v.IsArray { return "array" } ; return c.inferType(v.Name, "") }()
+        schema.Variables = append(schema.Variables, TemplateVariable{
             Name:        v.Name,
-            Type:        func() string { if v.IsArray { return "array" }; return c.inferType(v.Name, "") }(),
+            Type:        varType,
             Description: c.getFieldDescription(v.Name),
             Required:    v.Required,
+        })
+
+        // Group array element fields marked with []
+        if strings.Contains(v.Name, "[]") {
+            parts := strings.SplitN(v.Name, "[]", 2)
+            base := parts[0]
+            rest := strings.TrimPrefix(parts[1], ".")
+            props := ensureArray(base)
+            // build nested objects for rest
+            segs := []string{}
+            if rest != "" {
+                segs = strings.Split(rest, ".")
+            }
+            leafProps := props
+            if len(segs) > 1 {
+                leafProps = ensureNested(props, segs)
+            }
+            fieldName := rest
+            if len(segs) > 0 {
+                fieldName = segs[len(segs)-1]
+            }
+            leafProps[fieldName] = map[string]interface{}{
+                "type":        c.inferType(rest, ""),
+                "description": c.getFieldDescription(rest),
+            }
+            if v.Required {
+                // JSON Schema items.required should list the immediate leaf field name
+                itemsRequired[base] = append(itemsRequired[base], fieldName)
+            }
+            continue
         }
-        schema.Variables = append(schema.Variables, tv)
-        schema.Properties[v.Name] = map[string]interface{}{
-            "type":        tv.Type,
-            "description": tv.Description,
+
+        // Variable marking an array root
+        if v.IsArray {
+            _ = ensureArray(v.Name)
+            if v.Required {
+                schema.Required = append(schema.Required, v.Name)
+            }
+            continue
+        }
+
+        // Plain top-level property; group dotted paths into nested objects
+        if strings.Contains(v.Name, ".") {
+            segs := strings.Split(v.Name, ".")
+            // ensure root object exists
+            root := schema.Properties
+            leafProps := ensureNested(root, segs)
+            fieldName := segs[len(segs)-1]
+            leafProps[fieldName] = map[string]interface{}{
+                "type":        varType,
+                "description": c.getFieldDescription(v.Name),
+            }
+        } else {
+            schema.Properties[v.Name] = map[string]interface{}{
+                "type":        varType,
+                "description": c.getFieldDescription(v.Name),
+            }
         }
         if v.Required {
-            schema.Required = append(schema.Required, v.Name)
+            // For nested, mark only the top-level segment required
+            if strings.Contains(v.Name, ".") {
+                segs := strings.Split(v.Name, ".")
+                schema.Required = append(schema.Required, segs[0])
+            } else {
+                schema.Required = append(schema.Required, v.Name)
+            }
+        }
+    }
+
+    // Attach items.required per array, if any collected
+    for arrName, reqs := range itemsRequired {
+        if prop, ok := schema.Properties[arrName]; ok {
+            arrProp := prop.(map[string]interface{})
+            items := arrProp["items"].(map[string]interface{})
+            if len(reqs) > 0 {
+                items["required"] = reqs
+            }
         }
     }
 
